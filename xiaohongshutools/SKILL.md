@@ -16,12 +16,28 @@ Dependencies are already installed:
 pip install aiohttp loguru pycryptodome getuseragent
 ```
 
+### Windows / PowerShell Output Encoding
+
+小红书标题和正文常包含 emoji 或特殊符号。Windows PowerShell 下 Python 默认可能使用 `gbk/cp936` 输出，直接 `print()` 会触发 `UnicodeEncodeError` 或乱码。运行脚本前优先启用 UTF-8：
+
+```powershell
+$env:PYTHONIOENCODING='utf-8'
+```
+
+也可以使用：
+
+```powershell
+python -X utf8 your_script.py
+```
+
 ### Basic Usage
 
 ```python
 import asyncio
+import json
 import sys
-sys.path.insert(0, r'C:\\Users\\Chocomint\\.openclaw\\workspace\\xiaohongshu\\scripts')
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.path.insert(0, r'C:\\Users\\0\\.cursor\\skills\\xiaohongshutools\\scripts')
 
 from request.web.xhs_session import create_xhs_session
 
@@ -34,7 +50,7 @@ async def main():
     # Search notes
     res = await xhs.apis.note.search_notes("美妆")
     data = await res.json()
-    print(data)
+    print(json.dumps(data, ensure_ascii=False))
 
     await xhs.close_session()
 
@@ -176,60 +192,125 @@ All APIs are accessible via `xhs_session.apis.*`:
 
 ### Workflow 1: Search and Extract Notes
 
+**Input contract:** pass `keyword: str`, `max_notes: int = 5`, optional `proxy`, optional `web_session`.
+
+**Output contract:** return a list of note summaries with stable keys: `title`, `author`, `note_id`, `xsec_token`, `url`, `liked_count`.
+
 ```python
-async def search_example():
-    xhs_session = await create_xhs_session(proxy="http://127.0.0.1:7890")
+import asyncio
+import json
+import sys
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.path.insert(0, r'C:\\Users\\0\\.cursor\\skills\\xiaohongshutools\\scripts')
 
-    # Search for makeup tutorials
-    res = await xhs_session.apis.note.search_notes("美妆教程")
-    data = await res.json()
+from request.web.xhs_session import create_xhs_session
 
-    for note in data['data']['items']:
-        print(f"Title: {note['display_title']}")
-        print(f"Author: {note['user']['nickname']}")
-        print(f"Likes: {note['liked_count']}")
-        print("---")
+def normalize_note_item(item):
+    note = item.get("note_card") or item.get("note") or item
+    user = note.get("user") or item.get("user") or {}
+    note_id = item.get("id") or item.get("note_id") or note.get("note_id") or note.get("id")
+    xsec_token = item.get("xsec_token") or note.get("xsec_token") or ""
 
-    await xhs_session.close_session()
+    return {
+        "title": note.get("display_title") or note.get("title") or "",
+        "author": user.get("nickname") or "",
+        "note_id": note_id or "",
+        "xsec_token": xsec_token,
+        "url": (
+            f"https://www.xiaohongshu.com/explore/{note_id}"
+            f"?xsec_token={xsec_token}&xsec_source=pc_search"
+            if note_id and xsec_token
+            else f"https://www.xiaohongshu.com/explore/{note_id}" if note_id else ""
+        ),
+        "liked_count": note.get("liked_count") or "",
+    }
+
+async def search_example(keyword, max_notes=5, proxy=None, web_session=None):
+    xhs_session = await create_xhs_session(proxy=proxy, web_session=web_session)
+
+    try:
+        res = await xhs_session.apis.note.search_notes(keyword)
+        data = await res.json()
+        items = (data.get("data") or {}).get("items") or []
+        return [normalize_note_item(item) for item in items[:max_notes]]
+    finally:
+        await xhs_session.close_session()
+
+notes = asyncio.run(search_example("三清山 卧龙谷 攻略", max_notes=5))
+print(json.dumps(notes, ensure_ascii=False, indent=2))
 ```
 
 ### Workflow 2: Get Comments for Analysis
 
+**Input contract:** pass `note_id: str`, `xsec_token: str`, optional `max_comments`, optional `proxy`, optional `web_session`.
+
+**Output contract:** return a list of comment summaries with stable keys: `content`, `user`, `like_count`, `create_time`.
+
 ```python
-async def comments_example():
-    xhs_session = await create_xhs_session(proxy="http://127.0.0.1:7890")
+import asyncio
+import json
+import sys
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.path.insert(0, r'C:\\Users\\0\\.cursor\\skills\\xiaohongshutools\\scripts')
 
-    note_id = "64f1a2d30000000013003689"
-    res = await xhs_session.apis.comments.get_comments(note_id, "")
-    data = await res.json()
+from request.web.xhs_session import create_xhs_session
 
-    for comment in data['data']['comments']:
-        print(f"User: {comment['user']['nickname']}")
-        print(f"Content: {comment['content']}")
-        print(f"Likes: {comment['like_count']}")
-        print("---")
+def normalize_comment(comment):
+    user = comment.get("user") or {}
+    return {
+        "content": comment.get("content") or "",
+        "user": user.get("nickname") or "",
+        "like_count": comment.get("like_count") or comment.get("liked_count") or "",
+        "create_time": comment.get("create_time") or comment.get("time") or "",
+    }
 
-    await xhs_session.close_session()
+async def comments_example(note_id, xsec_token, max_comments=20, proxy=None, web_session=None):
+    xhs_session = await create_xhs_session(proxy=proxy, web_session=web_session)
+
+    try:
+        res = await xhs_session.apis.comments.get_comments(note_id, xsec_token)
+        data = await res.json()
+        comments = (data.get("data") or {}).get("comments") or []
+        return [normalize_comment(comment) for comment in comments[:max_comments]]
+    finally:
+        await xhs_session.close_session()
+
+comments = asyncio.run(comments_example("64f1a2d30000000013003689", ""))
+print(json.dumps(comments, ensure_ascii=False, indent=2))
 ```
 
 ### Workflow 3: User Profile Analysis
 
+**Input contract:** pass `web_session: str`, optional `proxy`.
+
+**Output contract:** return a profile summary with stable keys: `nickname`, `follows`, `fans`.
+
 ```python
-async def profile_example():
-    xhs_session = await create_xhs_session(
-        proxy="http://127.0.0.1:7890",
-        web_session="your_cookie_here"
-    )
+import asyncio
+import json
+import sys
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.path.insert(0, r'C:\\Users\\0\\.cursor\\skills\\xiaohongshutools\\scripts')
 
-    # Get self info
-    res = await xhs_session.apis.auth.get_self_simple_info()
-    data = await res.json()
+from request.web.xhs_session import create_xhs_session
 
-    print(f"Username: {data['data']['user']['nickname']}")
-    print(f"Followers: {data['data']['user']['follows']}")
-    print(f"Fans: {data['data']['user']['fans']}")
+async def profile_example(web_session, proxy=None):
+    xhs_session = await create_xhs_session(proxy=proxy, web_session=web_session)
 
-    await xhs_session.close_session()
+    try:
+        res = await xhs_session.apis.auth.get_self_simple_info()
+        data = await res.json()
+        user = ((data.get("data") or {}).get("user") or {})
+        return {
+            "nickname": user.get("nickname") or "",
+            "follows": user.get("follows") or "",
+            "fans": user.get("fans") or "",
+        }
+    finally:
+        await xhs_session.close_session()
+
+profile = asyncio.run(profile_example("your_cookie_here"))
+print(json.dumps(profile, ensure_ascii=False, indent=2))
 ```
 
 ## Important Notes
@@ -272,6 +353,11 @@ Based on [RedCrack](https://github.com/Cialle/RedCrack) - Pure Python reverse en
 ### 401/403 errors
 - web_session 可能过期
 - 小红书可能更新了风控参数/签名逻辑（需要更新逆向实现）
+
+### UnicodeEncodeError / 乱码
+- Windows PowerShell 默认输出编码可能是 `gbk/cp936`，小红书内容里的 emoji、特殊符号或繁体字可能无法打印。
+- 先设置 `$env:PYTHONIOENCODING='utf-8'`，或用 `python -X utf8` 运行脚本。
+- 脚本中可加 `sys.stdout.reconfigure(encoding="utf-8", errors="replace")`，避免结果提取时因单个字符中断。
 
 ### Import errors
 - Ensure all dependencies are installed: `pip install aiohttp loguru pycryptodome getuseragent`
